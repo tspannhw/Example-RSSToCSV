@@ -4,7 +4,6 @@ import io
 from nifiapi.flowfiletransform import FlowFileTransform, FlowFileTransformResult
 from nifiapi.properties import PropertyDescriptor, StandardValidators
 
-
 class RSSToCSV(FlowFileTransform):
     class Java:
         implements = ['org.apache.nifi.python.processor.FlowFileTransform']
@@ -15,22 +14,27 @@ class RSSToCSV(FlowFileTransform):
         description = 'Reads an RSS feed from a URL and converts it to CSV format'
         tags = ['rss', 'csv', 'feed', 'transform']
 
-    def __init__(self, **kwargs):
-        # Call parent constructor to handle any NiFi-specific initialization
-        super().__init__()
-        
-        # Define properties
-        self.rss_url = PropertyDescriptor(
+    rss_url = PropertyDescriptor(
             name='RSS URL',
             description='The URL of the RSS feed to read',
             required=True,
             validators=[StandardValidators.URL_VALIDATOR]
-        )
+    )
+
+    property_descriptors = [
+        rss_url
+    ]
+
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.property_descriptors.append(self.rss_url)
 
     def getPropertyDescriptors(self):
-        return [self.rss_url]
+        return self.property_descriptors
 
     def transform(self, context, flowfile):
+        import feedparser
+        import pandas as pd
         try:
             # Get the RSS URL from properties
             rss_url = context.getProperty(self.rss_url).getValue()
@@ -38,11 +42,19 @@ class RSSToCSV(FlowFileTransform):
             # Parse the RSS feed
             feed = feedparser.parse(rss_url)
             
-            # Check if feed was parsed successfully
-            if hasattr(feed, 'bozo') and feed.bozo:
+            # Check if feed was parsed successfully and has entries
+            if hasattr(feed, 'bozo') and feed.bozo and not feed.entries:
+                error_msg = f"Failed to parse RSS feed. Bozo exception: {getattr(feed, 'bozo_exception', 'Unknown error')}"
                 return FlowFileTransformResult(
-                    relationship='failure',
-                    attributes={'error': 'Failed to parse RSS feed'}
+                    relationship="failure",
+                    attributes={'error': error_msg}
+                )
+            
+            # Check if feed has entries
+            if not feed.entries:
+                return FlowFileTransformResult(
+                    relationship="failure",
+                    attributes={'error': 'RSS feed contains no entries'}
                 )
             
             # Extract feed items data
@@ -76,25 +88,19 @@ class RSSToCSV(FlowFileTransform):
             }
             
             return FlowFileTransformResult(
-                relationship='success',
+                relationship="success",
                 contents=csv_content,
                 attributes=attributes
             )
-            
         except Exception as e:
-            return FlowFileTransformResult(
-                relationship='failure',
-                attributes={'error': str(e)}
-            )
-
-    def getRelationships(self):
-        return [
-            {
-                'name': 'success',
-                'description': 'FlowFiles that are successfully converted to CSV'
-            },
-            {
-                'name': 'failure', 
-                'description': 'FlowFiles that failed to be processed'
+            import traceback
+            error_details = {
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'rss_url': context.getProperty(self.rss_url).getValue() if context.getProperty(self.rss_url) else 'Unknown',
+                'traceback': traceback.format_exc()
             }
-        ]
+            return FlowFileTransformResult(
+                relationship="failure",
+                attributes=error_details
+            )
